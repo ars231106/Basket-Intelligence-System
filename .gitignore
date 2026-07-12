@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+data/
+features/
+graphs/
+communities/
+baskets/
+portfolio/
+reports/
+backtests/
+backtest_tmp/
+_backup_pre_*/
