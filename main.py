@@ -27,6 +27,8 @@ from src.basket_returns import  (load_candidate_baskets,compute_basket_daily_ret
 from src.markowitz_optimiser import (negetive_sharpe_ratio_scipy_minimisation, optimise_portfolio, save_markovitz)
 from src.risk_parity_optimiser import (optimize_risk_parity, save_risk_parity)
 from src.backtest_engine import run_backtest, run_benchmark, compute_summary_stats
+from src.intra_basket_allocator import basket_weights_to_stock_weights_v2
+from src.capital_sizing import load_latest_prices, compute_minimum_viable_capital, check_affordability
 from src.black_litterman import (compute_market_weights, compute_equilibrium_returns,
                                  generate_picking_matrix, generate_view_returns, compute_confidence_matrix, 
                                  compute_black_litterman_returns, save_black_litterman)
@@ -47,8 +49,9 @@ print("8. HSI")
 print("9. NIFTYMID150")
 print("10. NIKKEI225")
 print("11. KOSPI200")
+print("12. NIFTYSMALL250")
 
-choice = input("\nEnter Choice of Index (1-11): ")
+choice = input("\nEnter Choice of Index (1-12): ")
 
 if choice == "1":
     universe_name = "nifty50"
@@ -81,7 +84,10 @@ elif choice == "10":
     universe_name = "nikkei225"
 
 elif choice == "11":
-    universe_name = "kospi200" 
+    universe_name = "kospi200"
+
+elif choice == "12":
+    universe_name = "niftysmall250" 
 
 else:
     print("Universe Currently Unavailable.")
@@ -341,6 +347,86 @@ elif choice == "6":
     print(allocation)
 
 print("\n===================================")
+print("WITHIN-BASKET ALLOCATION")
+print("===================================\n")
+print("This decides how each basket's own capital is split among its member stocks --")
+print("a separate choice from the basket-level strategy above.\n")
+print("1. Equal Weight (default -- same behaviour as before this feature existed)")
+print("2. Range Position (Mid-Weighted) -- heaviest weight to stocks mid-range in their 52-week high/low")
+print("3. 52-Week High Momentum -- heaviest weight to stocks near their 52-week high with strong momentum")
+print("4. Inverse Volatility (Intra-Basket) -- calmer stocks in the basket get more capital")
+print("5. Volume-Conditioned Momentum -- momentum winners, discounted if recent volume spiked")
+
+intra_choice = input("Enter a choice: ")
+intra_strategy_map = {
+    "1": "equal_weighted", "2": "range_position", "3": "high_momentum",
+    "4": "inverse_volatility_intra", "5": "volume_conditioned_momentum",
+}
+intra_basket_strategy = intra_strategy_map.get(intra_choice, "equal_weighted")
+
+# stock_baskets only carries Basket_ID/Community/Symbol/Company/Stock_Score -- the
+# within-basket strategies need the actual behaviour features (Volatility, Momentum,
+# Volume_Growth, Range_Position_52W), which live in the behaviour dataset built earlier.
+behaviour_dataset = pd.read_csv(f"features/{universe_name}_behaviour_dataset.csv")
+baskets_with_features = stock_baskets.merge(behaviour_dataset, on="Symbol", how="left")
+
+stock_capital = basket_weights_to_stock_weights_v2(
+    baskets_with_features, allocation["Basket_ID"].tolist(), allocation["Capital_Distribution"].tolist(),
+    strategy=intra_basket_strategy,
+)
+
+stock_allocation = pd.DataFrame(
+    [{"Symbol": symbol, "Capital_Distribution": amount} for symbol, amount in stock_capital.items()]
+).merge(stock_baskets[["Basket_ID", "Symbol", "Company"]], on="Symbol", how="left")
+stock_allocation = stock_allocation.sort_values("Capital_Distribution", ascending=False).reset_index(drop=True)
+
+stock_allocation_dir = "./portfolio/stock_allocations"
+os.makedirs(stock_allocation_dir, exist_ok=True)
+stock_allocation_file = os.path.join(stock_allocation_dir, f"{universe_name}_stock_allocation.csv")
+stock_allocation.to_csv(stock_allocation_file, index=False)
+
+print(f"\nPer-Stock Capital Allocation ({intra_basket_strategy}):")
+print(stock_allocation[["Basket_ID", "Symbol", "Company", "Capital_Distribution"]].to_string(index=False))
+print(f"\nSaved to: {stock_allocation_file}")
+
+print("\n===================================")
+print("CAPITAL SIZING CHECK")
+print("===================================\n")
+print("NSE/BSE (and most non-US exchanges) require whole-share purchases -- this checks")
+print("whether your entered capital can actually buy every selected stock as at least")
+print("1 whole share close to its target weight, or if it's below the real-world floor.\n")
+
+latest_prices = load_latest_prices(stock_allocation["Symbol"].tolist(), save_dir)
+sizing = compute_minimum_viable_capital(stock_allocation, capital, latest_prices)
+
+if sizing.empty:
+    print("Could not compute a capital sizing check -- no price data available for the selected stocks.")
+else:
+    floor_row = sizing.iloc[0]
+    min_viable_capital = floor_row["Required_Capital_For_1_Share"]
+
+    print(f"Minimum viable capital for this exact selection: {min_viable_capital:,.2f}")
+    print(f"(Set by {floor_row['Symbol']} -- {floor_row['Company']}, priced at {floor_row['Price']:,.2f}, "
+          f"{floor_row['Target_Weight']*100:.2f}% target weight)")
+
+    if capital < min_viable_capital:
+        affordability = check_affordability(stock_allocation, capital, latest_prices)
+        unaffordable = affordability[~affordability["Affordable"]]
+        print(f"\nYour entered capital ({capital:,.2f}) is below this floor.")
+        print(f"{len(unaffordable)} of {len(affordability)} selected stocks would get 0 whole shares "
+              f"and sit as unspent cash at this capital level:")
+        print(unaffordable[["Basket_ID", "Symbol", "Company", "Price", "Allocated_Capital"]].to_string(index=False))
+    else:
+        print(f"\nYour entered capital ({capital:,.2f}) comfortably covers this -- every selected stock "
+              f"can be bought as at least 1 whole share close to its target weight.")
+
+    sizing_dir = "./portfolio/capital_sizing"
+    os.makedirs(sizing_dir, exist_ok=True)
+    sizing_file = os.path.join(sizing_dir, f"{universe_name}_capital_sizing.csv")
+    sizing.to_csv(sizing_file, index=False)
+    print(f"\nSaved to: {sizing_file}")
+
+print("\n===================================")
 print("WALK-FORWARD BACKTEST")
 print("===================================\n")
 
@@ -368,14 +454,17 @@ if backtest_choice == "y":
     benchmark_stats = compute_summary_stats(benchmark)
     benchmark_stats["Scoring_Method"] = "benchmark"
     benchmark_stats["Allocation_Strategy"] = "equal_weight_universe"
+    benchmark_stats["Within_Basket_Strategy"] = "n/a"
 
-    print(f"Running backtest: scoring={bt_scoring_method}, allocation={strategy}...")
+    print(f"Running backtest: scoring={bt_scoring_method}, allocation={strategy}, "
+          f"within-basket={intra_basket_strategy}...")
     equity_curve = run_backtest(universe_name, bt_start_date, bt_end_date, bt_scoring_method, strategy,
-                               k_baskets=k, models=bt_models)
+                               k_baskets=k, models=bt_models, intra_basket_strategy=intra_basket_strategy)
     equity_curve["Capital_Value"] = equity_curve["Equity"] * capital
     stats = compute_summary_stats(equity_curve)
     stats["Scoring_Method"] = bt_scoring_method
     stats["Allocation_Strategy"] = strategy
+    stats["Within_Basket_Strategy"] = intra_basket_strategy
 
     os.makedirs("backtests", exist_ok=True)
     equity_curve.to_csv(f"backtests/{universe_name}_{bt_scoring_method}_{strategy}_equity_curve.csv", index=False)

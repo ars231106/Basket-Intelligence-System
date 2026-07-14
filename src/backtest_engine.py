@@ -17,6 +17,7 @@ from src.risk_parity_optimiser import optimize_risk_parity
 from src.black_litterman import (compute_market_weights, compute_equilibrium_returns,
                                  generate_picking_matrix, generate_view_returns,
                                  compute_confidence_matrix, compute_black_litterman_returns)
+from src.intra_basket_allocator import basket_weights_to_stock_weights_v2
 
 HEURISTIC_STRATEGIES = {"equal_weighted", "score_weighted", "inverse_volatility"}
 
@@ -148,7 +149,7 @@ def allocate(strategy, selected_baskets, basket_returns, tmp_dir):
 
 def run_backtest(universe_name, start_date, end_date, scoring_method, allocation_strategy,
                  k_baskets=9, freq="MS", txn_cost_bps=10, min_history=260, models=None,
-                 tmp_dir="backtest_tmp"):
+                 tmp_dir="backtest_tmp", intra_basket_strategy="equal_weighted"):
     os.makedirs(tmp_dir, exist_ok=True)
 
     communities_file = f"communities/{universe_name}_communities.csv"
@@ -204,7 +205,15 @@ def run_backtest(universe_name, start_date, end_date, scoring_method, allocation
                 continue
 
         basket_weights = allocate(allocation_strategy, selected_baskets, basket_returns, tmp_dir)
-        stock_weights = basket_weights_to_stock_weights(candidate_baskets, basket_weights.keys(), basket_weights.values())
+
+        # candidate_baskets only carries Basket_ID/Community/Symbol/Company/Stock_Score --
+        # the within-basket strategies need the actual behaviour features (Volatility,
+        # Momentum, Volume_Growth, Range_Position_52W), which live in trailing_behaviour.
+        # Every symbol in candidate_baskets was scored from trailing_behaviour in the
+        # first place, so this merge is always complete -- no missing-feature rows.
+        candidate_baskets_with_features = candidate_baskets.merge(trailing_behaviour, on="Symbol", how="left")
+        stock_weights = basket_weights_to_stock_weights_v2(candidate_baskets_with_features, basket_weights.keys(),
+                                                            basket_weights.values(), strategy=intra_basket_strategy)
 
         forward_returns = compute_forward_returns(stock_weights.keys(), price_data, t, t_next)
         gross_return = sum(w * forward_returns.get(s, 0) for s, w in stock_weights.items())

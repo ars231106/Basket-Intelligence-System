@@ -51,6 +51,26 @@ def calculate_atr(df, period = 14):
     atr = tr.rolling(period).mean()
     return atr.iloc[-1]
 
+def calculate_range_position_52w(df, window=252):
+    """
+    Where the latest close sits within its trailing ~52-week (252 trading
+    day) high-low range, scaled to 0 (sitting right at the 52-week low)
+    through 1 (sitting right at the 52-week high), with 0.5 meaning dead
+    center. Used for within-basket allocation strategies that weight
+    stocks by their position in their own recent trading range.
+
+    Falls back to however much history is actually available (via
+    .tail(), not a hard requirement of exactly 252 rows) so it behaves
+    consistently with the other rolling-window features here rather than
+    returning NaN for a stock with slightly under a year of history.
+    """
+    window_data = df["Close"].tail(window)
+    low_52w = window_data.min()
+    high_52w = window_data.max()
+    if high_52w - low_52w < 1e-12:
+        return 0.5
+    return (df["Close"].iloc[-1] - low_52w) / (high_52w - low_52w)
+
 FEATURES = {
     "Mean_Return": calculate_mean_return,
     "Volatility": calculate_volatility,
@@ -62,6 +82,7 @@ FEATURES = {
     "Distance_SMA20": calculate_distance_sma20,
     "Distance_SMA50": calculate_distance_sma50,
     "Sharpe_Ratio": calculate_sharpe_ratio,
+    "Range_Position_52W": calculate_range_position_52w,
 }
 
 def compute_features(df):
