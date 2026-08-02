@@ -1,0 +1,5 @@
+[lint]
+# Only real-bug-catching rules: E9 = syntax errors, F = pyflakes (undefined
+# names, unused imports, etc). Deliberately not the full style rule set --
+# this CI step exists to catch broken code, not to enforce a style guide.
+select = ["E9", "F"]
